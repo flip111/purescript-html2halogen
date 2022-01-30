@@ -1,0 +1,8 @@
+{
+  "dependencies": {
+    "jsdom": "^19.0.0"
+  },
+  "devDependencies": {
+    "html-differ": "github:flip111/html-differ#patch-1"
+  }
+}
