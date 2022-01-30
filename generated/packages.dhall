@@ -103,8 +103,6 @@ let upstream =
 
 in  upstream
   with halogen-vdom-string-renderer =
-         ../../purescript-halogen-vdom-string-renderer/spago.dhall as Location
-{-
     { dependencies =
         [ "arrays"
         , "foreign"
@@ -120,6 +118,5 @@ in  upstream
     , repo =
         "https://github.com/flip111/purescript-halogen-vdom-string-renderer.git"
     , version =
-        "patch-1"  -- branch, tag, or commit hash
+        "patch-2"  -- branch, tag, or commit hash
     }
--}
