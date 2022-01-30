@@ -3,7 +3,7 @@ module Main where
 import Prelude
 
 import Control.Monad.State
-import Data.Array hiding (fold, length, null, foldM, elem, notElem)
+import Data.Array hiding (fold, length, null, foldM, elem, notElem, intercalate)
 import Data.Either
 import Data.Foldable
 import Data.Generic.Rep (class Generic)
@@ -43,6 +43,8 @@ foreign import makeNodeCompatible :: Effect Unit
 data CLArgs = CLArgs
   { inputFilepath :: String
   , outputFilepath :: String
+  , noCssHelper :: Boolean
+  , notExecutable :: Boolean
   }
 
 derive instance genericCLArgs :: Generic CLArgs _
@@ -64,21 +66,32 @@ cl_args_parser = ado
     , help "output html file"
     ]
 
-  in CLArgs { inputFilepath, outputFilepath }
+  noCssHelper <- switch
+    (  long "no-css-helper"
+    <> help "Disable the css helper function and use coerce for ClassName newtype wrapper." )
+
+  notExecutable <- switch
+    (  long "not-executable"
+    <> help "Makes the code not executable on itself while removing the dependencies on nodejs. Use an executable to quickly generate a static HTML to verify the conversion was succesful. Use non-executable for easy copy-paste into another project." )
+
+  in CLArgs { inputFilepath, outputFilepath, noCssHelper, notExecutable }
 
 cliOptions = info (cl_args_parser <**> helper)
   ( fullDesc
  <> header "html2halogen" )
 
 type RunState =
-  { errors :: Array String
+  { errors :: Array String -- Doesn't need to be read during execution
   , waitForBody :: Boolean -- "</head> <body>" will yield one single space #text element, which we want to ignore. This flag helps
   , sawClasses :: Boolean -- the test html doesn't actually use classes so we have an unsed import Unsafe.Coerce
+  , noCssHelper :: Boolean -- this is not supposed to be written to, possibly should be ReaderT
   }
-intialRunState =
+initialRunState :: CLArgs -> RunState
+initialRunState (CLArgs cli_options) =
   { errors: []
   , waitForBody: false
   , sawClasses: false
+  , noCssHelper: cli_options.noCssHelper
   }
 
 
@@ -216,7 +229,7 @@ attributesToAST n attributes = FO.foldM (helper n) [] attributes
           in case k of
                key
                  | key == "id"   -> pure Nothing -- already have a separate implementation for handling the id elswhere
-                 | isStringProp  -> 
+                 | isStringProp  ->
                      if (nodeName n) == "METER" then do
                        addNoHalogenError "Property \"value\" on tag \"meter\" is broken. https://github.com/purescript-halogen/purescript-halogen/issues/785"
                        pure Nothing
@@ -266,13 +279,20 @@ handleNodeWithChildren n function_name_with_props makeChildren = do
 
         attributes <- attributesToAST n e_info.attributes
 
-        let classes =
-              let first_part :: String -> Expr Void -> Expr Void
-                  first_part classname expr = exprOp (exprIdent classname) [ binaryOp "$" (exprApp (exprIdent "coerce") [expr] )]
-              in case length (e_info.classList) of
-                   0 -> []
-                   1 -> [ first_part "HP.class_" $ exprString $ unsafePartial $ fromJust $ head e_info.classList ]
-                   _ -> [ first_part "HP.classes" $ exprArray $ map exprString e_info.classList ]
+        classes <- do
+          no_css_helper <- gets (_.noCssHelper)
+          if no_css_helper then
+            let first_part :: String -> Expr Void -> Expr Void
+                first_part classname expr = exprOp (exprIdent classname) [ binaryOp "$" (exprApp (exprIdent "coerce") [expr] )]
+            in pure $ case length (e_info.classList) of
+                 0 -> []
+                 1 -> [ first_part "HP.class_" $ exprString $ unsafePartial $ fromJust $ head e_info.classList ]
+                 _ -> [ first_part "HP.classes" $ exprArray $ map exprString e_info.classList ]
+          else pure
+            case length (e_info.classList) of
+              0 -> []
+              1 -> [ exprApp (exprIdent "css") [exprString $ unsafePartial $ fromJust $ head e_info.classList] ]
+              _ -> [ exprApp (exprIdent "css") [exprString $ intercalate " " e_info.classList] ]
 
         when (not $ null classes) $ modify_ (_ { sawClasses = true })
 
@@ -314,7 +334,7 @@ noChildrenAndOnlyWhitespace n = do
 main :: Effect Unit
 main = do
   makeNodeCompatible
-  (CLArgs cli_options) <- execParser cliOptions
+  clargs@(CLArgs cli_options) <- execParser cliOptions
   html <- readTextFile UTF8 cli_options.inputFilepath
   parser <- makeDOMParser
   doc <- parseHTMLFromString html parser
@@ -322,7 +342,7 @@ main = do
     Left err -> log "hello"
     Right doc -> do
       let n = toNode doc
-      (Tuple codegen_module { errors }) <- runner n
+      (Tuple codegen_module { errors }) <- runner clargs n
       let ps_code = printModule codegen_module
       let errors2 = nub $ sort errors -- a bit tougher to debug what happened in which order, but easier for the user
       for_ errors2 error
@@ -332,13 +352,13 @@ main = do
   log "🍝 lunch is ready"
 
 
-runner :: Node -> Effect (Tuple (Module Void) RunState)
-runner n = flip runStateT intialRunState runCodegen
+runner :: CLArgs -> Node -> Effect (Tuple (Module Void) RunState)
+runner clargs n = flip runStateT (initialRunState clargs) runCodegen
   where runCodegen :: StateT RunState Effect (Module Void)
-        runCodegen = unsafePartial (halogenHeader n)
+        runCodegen = unsafePartial (halogenHeader clargs n)
 
-halogenHeader :: Node -> Partial => StateT RunState Effect (Module Void)
-halogenHeader n = do
+halogenHeader :: CLArgs -> Node -> Partial => StateT RunState Effect (Module Void)
+halogenHeader (CLArgs cli_options) n = do
   halogen_elements <- run n
 
   let halogen_expression =
@@ -349,27 +369,64 @@ halogenHeader n = do
 
   saw_classes <- gets (_.sawClasses)
 
-  pure $ module_ "Main" []
-    (
-      [ declImport "Prelude" []
-      , declImport "Effect" [ importType "Effect" ]
-      , declImportAs "Halogen.HTML" [] "HH"
-      , declImportAs "Halogen.HTML.Properties" [] "HP"
-      , declImport "Halogen.VDom.DOM.StringRenderer" [ importValue "render" ]
-      , declImport "Node.Encoding" [ importTypeMembers "Encoding" ["UTF8"] ]
-      , declImport "Node.FS.Sync" [importValue "writeTextFile"]
-      ]
-    <> (if saw_classes then [declImport "Safe.Coerce" [importValue "coerce"]] else [])
-    )
-    [ declSignature "renderHtml" $ typeArrow [ typeApp (typeCtor "HH.HTML") [typeCtor "String", typeCtor "Void"] ] ( typeCtor "String" )
-    , declValue "renderHtml" [binderParens $ binderCtor "HH.HTML" [binderVar "inner"]] $
-        exprApp (exprIdent "render") [exprIdent "identity", exprIdent "inner"]
+  let gen_imports =
+        [ declImport "Prelude" [] ]
+        <>
+        ( if cli_options.notExecutable then
+            []
+          else
+            [ declImport "Effect" [ importType "Effect" ] ]
+        )
+        <>
+        [ declImportAs "Halogen.HTML" [] "HH"
+        , declImportAs "Halogen.HTML.Properties" [] "HP"
+        ]
+        <>
+        ( if cli_options.notExecutable then
+            []
+          else
+            [ declImport "Halogen.VDom.DOM.StringRenderer" [ importValue "render" ]
+            , declImport "Node.Encoding" [ importTypeMembers "Encoding" ["UTF8"] ]
+            , declImport "Node.FS.Sync" [importValue "writeTextFile"]
+            ]
+        )
+        <>
+        ( if saw_classes && cli_options.noCssHelper then
+            [declImport "Safe.Coerce" [importValue "coerce"]]
+          else
+            []
+        )
 
-    , declSignature "main" $ typeApp (typeCtor "Effect") [ typeCtor "Unit" ]
-    , declValue "main" [] $
-        let first_part = exprApp (exprIdent "writeTextFile") [exprCtor "UTF8", exprString "output.html"]
-        in exprOp first_part [ binaryOp "$" (exprIdent "renderHtml"), binaryOp "$" halogen_expression ]
-    ]
+
+  let gen_declarations =
+        ( if cli_options.noCssHelper then
+            []
+          else
+            [ declSignature "css" $
+                typeForall [ typeVar "r", typeVar "i" ] $
+                  typeArrow [typeCtor "String"]
+                    (typeApp (typeCtor "HH.IProp") [typeRow [Tuple "class" (typeCtor "String")] (Just (typeVar "r")), typeVar "i"])
+            , declValue "css" [] $
+                exprOp (exprIdent "HP.class_") [ binaryOp "<<<" (exprCtor "HH.ClassName") ]
+            ]
+        ) <>
+        if cli_options.notExecutable then
+          [ declSignature "template" $ typeForall [typeVar "w", typeVar "i"] $ typeApp (typeCtor "HH.HTML") [typeVar "w", typeVar "i"]
+          , declValue "template" [] halogen_expression
+          ]
+        else
+          [ declSignature "renderHtml" $ typeArrow [ typeApp (typeCtor "HH.HTML") [typeCtor "String", typeCtor "Void"] ] ( typeCtor "String" )
+          , declValue "renderHtml" [binderParens $ binderCtor "HH.HTML" [binderVar "inner"]] $
+              exprApp (exprIdent "render") [exprIdent "identity", exprIdent "inner"]
+
+          , declSignature "main" $ typeApp (typeCtor "Effect") [ typeCtor "Unit" ]
+          , declValue "main" [] $
+              let first_part = exprApp (exprIdent "writeTextFile") [exprCtor "UTF8", exprString "output.html"]
+              in exprOp first_part [ binaryOp "$" (exprIdent "renderHtml"), binaryOp "$" halogen_expression ]
+          ]
+
+  pure $ module_ "Main" [] gen_imports gen_declarations
+
 
 
 

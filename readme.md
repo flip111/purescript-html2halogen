@@ -5,12 +5,6 @@
 spago run -a '--help'
 ```
 
-## building & running
-```shell
-spago build
-node index.js
-```
-
 ## Development
 
 ### automatic rebuild for development
