@@ -146,9 +146,7 @@ let upstream =
     , "unicode"
     ]
 
-let overrides =
-  { web-dom = ./purescript-web-dom/spago.dhall as Location
-  }
+let overrides = {=}
 
 let additions =
   { dodo-printer =
