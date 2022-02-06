@@ -20,3 +20,7 @@ exports.makeNodeCompatible = function() {
 // else{
 //     // not node
 // }
+
+exports.elementGetOuterHtml = function(element) {
+  return element.outerHTML;
+};

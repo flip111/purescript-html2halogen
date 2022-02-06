@@ -10,3 +10,4 @@
 /.spago
 /output.html
 /src/Main.purs
+/dist/

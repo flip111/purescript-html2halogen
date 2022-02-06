@@ -34,7 +34,7 @@ spago bundle-app --before " zsh -c \"export DISABLE_AUTO_TITLE=true; print -Pn \
 https://github.com/flip111/html-differ/tree/patch-1
 
 ```shell
-./index.js --input test.html --output 'generated/src/Main.purs'  && (cd generated; spago run; cd ..) && html-differ test.html generated/output.html
+./index.js --input test.html --output 'generated/src/Main.purs' && (cd generated; spago run; cd ..) && html-differ test.html generated/output.html
 ```
 
 ### todo

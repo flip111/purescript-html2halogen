@@ -7,11 +7,13 @@ import Data.Array hiding (fold, length, null, foldM, elem, notElem, intercalate)
 import Data.Either
 import Data.Foldable
 import Data.Generic.Rep (class Generic)
+import Data.Int
 import Data.Maybe
 import Data.Show.Generic (genericShow)
+import Data.String as String
+import Data.String hiding (null, length)
 import Data.Traversable
 import Data.Tuple
-import Debug
 import Effect (Effect)
 import Effect.Class
 import Effect.Console (log, error)
@@ -19,7 +21,9 @@ import Foreign.Object as FO
 import Node.Encoding
 import Node.FS.Sync
 import Options.Applicative
+import Options.Applicative.Builder (eitherReader)
 import Partial.Unsafe
+import PureScript.CST.Print
 import PureScript.CST.Types
 import Tidy.Codegen
 import Web.DOM.Attr (Attr)
@@ -32,25 +36,43 @@ import Web.DOM.NamedNodeMap
 import Web.DOM.Node
 import Web.DOM.NodeList hiding (length)
 import Web.DOM.NodeType
-import PureScript.CST.Print
-import Data.String hiding (null, length)
-import Data.String as String
-import Data.Int
 
 
 foreign import makeNodeCompatible :: Effect Unit
+foreign import elementGetOuterHtml :: Element -> String
 
 data CLArgs = CLArgs
   { inputFilepath :: String
   , outputFilepath :: String
   , noCssHelper :: Boolean
-  , notExecutable :: Boolean
+  , format :: CLFormat
   }
-
 derive instance genericCLArgs :: Generic CLArgs _
-
 instance showCLArgs :: Show CLArgs where
   show = genericShow
+
+formatHelp :: String
+formatHelp
+  =  "format controls the contents of the resulting purescript file.\n"
+  <> "\n"
+  <> "plain: simplest type of output with most flexible HTML type. Suitable to copy paste into your own code.\n"
+  <> "file: when executed renders the html and saves it to a file. Uses nodejs dependencies. Useful for testing html2halogen.\n"
+  <> "raw: Uses halogen's type ComponentHTML which allows injection of HTML as a raw string. Useful for encountering unsupported HTML elements.\n"
+  <> "app: Same as raw but comes with extra code that allows the code executed as halogen app in the browser. (parcel index.html)"
+
+data CLFormat = Plain | File | Raw | App
+derive instance eqCLFormat :: Eq CLFormat
+derive instance genericCLFormat :: Generic CLFormat _
+instance showCLFormat :: Show CLFormat where
+  show = genericShow
+
+parseFormat :: ReadM CLFormat
+parseFormat = eitherReader $ \s -> case (toLower s) of
+  "plain" -> Right Plain
+  "file"  -> Right File
+  "raw"   -> Right Raw
+  "app"   -> Right App
+  _       -> Left $ "format should be either one of plain, file, raw or app. Found \"" <> s <> "\""
 
 cl_args_parser :: Parser CLArgs
 cl_args_parser = ado
@@ -70,11 +92,12 @@ cl_args_parser = ado
     (  long "no-css-helper"
     <> help "Disable the css helper function and use coerce for ClassName newtype wrapper." )
 
-  notExecutable <- switch
-    (  long "not-executable"
-    <> help "Makes the code not executable on itself while removing the dependencies on nodejs. Use an executable to quickly generate a static HTML to verify the conversion was succesful. Use non-executable for easy copy-paste into another project." )
+  format <- option parseFormat
+    ( long "format"
+    <> metavar "FORMAT"
+    <> help formatHelp )
 
-  in CLArgs { inputFilepath, outputFilepath, noCssHelper, notExecutable }
+  in CLArgs { inputFilepath, outputFilepath, noCssHelper, format }
 
 cliOptions = info (cl_args_parser <**> helper)
   ( fullDesc
@@ -95,10 +118,10 @@ initialRunState (CLArgs cli_options) =
   }
 
 
-getChildrenExpr :: Partial => Node -> StateT RunState Effect (Array (Array (Expr Void)))
-getChildrenExpr n = do
+getChildrenExpr :: Partial => CLArgs -> Node -> StateT RunState Effect (Array (Array (Expr Void)))
+getChildrenExpr clargs n = do
   child_nodes <- liftEffect $ childNodes n >>= toArray
-  traverse run child_nodes
+  traverse (run clargs) child_nodes
 
 addInvalidHTMLError :: String -> StateT RunState Effect Unit
 addInvalidHTMLError err = addError $ "error[invalid HTML] " <> err
@@ -106,8 +129,14 @@ addInvalidHTMLError err = addError $ "error[invalid HTML] " <> err
 addUnimplementedError :: String -> StateT RunState Effect Unit
 addUnimplementedError err = addError $ "error[unimplemented] " <> err
 
+addConvertedToRawInfo :: String -> StateT RunState Effect Unit
+addConvertedToRawInfo err = addError $ "info[converted to raw] " <> err
+
 addNoHalogenError :: String -> StateT RunState Effect Unit
 addNoHalogenError err = addError $ "error[no halogen equivalent] " <> err
+
+addProgramError :: String -> StateT RunState Effect Unit
+addProgramError err = addError $ "error[program error] " <> err
 
 addError :: String -> StateT RunState Effect Unit
 addError err = modify_ \rec@{ errors } -> rec { errors = errors <> [err] }
@@ -116,20 +145,20 @@ addContinueError :: String -> StateT RunState Effect Unit
 addContinueError node_name = addNoHalogenError $ "Found node \"" <> node_name <> "\", continuing with it's child nodes."
 
 
-n_html :: Partial => Node -> StateT RunState Effect (Array (Expr Void))
-n_html n = do
+n_html :: Partial => CLArgs -> Node -> StateT RunState Effect (Array (Expr Void))
+n_html clargs n = do
   modify_ (_ { waitForBody = true })
   (liftEffect $ hasChildNodes n) >>= case _ of
     false -> do
       addNoHalogenError "Found node \"html\" with no children, this is probably the doctype."
       pure []
-    true  -> errorAndContinue n
+    true  -> errorAndContinue clargs n
 
 
-errorAndContinue :: Partial => Node -> StateT RunState Effect (Array (Expr Void))
-errorAndContinue n = do
+errorAndContinue :: Partial => CLArgs -> Node -> StateT RunState Effect (Array (Expr Void))
+errorAndContinue clargs n = do
   addContinueError $ nodeName n
-  children_expr <- getChildrenExpr n
+  children_expr <- getChildrenExpr clargs n
 
   if nodeName n `elem` ["HTML", "#document"] then
     pure $ concat children_expr
@@ -144,27 +173,27 @@ mergeChildren n children_expr = foldM f [] children_expr
             0 -> pure acc
             1 -> pure $ acc <> [unsafePartial $ fromJust $ head childResult]
             _ -> do
-              addError $ "error[program error] found a child that returned multiple elements in parent \"" <> (nodeName n) <> "\""
+              addProgramError $ "found a child that returned multiple elements in parent \"" <> (nodeName n) <> "\""
               pure acc
 
 
 
 
 -- liftEffect $ getShortNodeInfo n >>= traceM
-run :: Partial => Node -> StateT RunState Effect (Array (Expr Void))
-run n = case nodeName n of
+run :: Partial => CLArgs -> Node -> StateT RunState Effect (Array (Expr Void))
+run clargs@(CLArgs cli_options) n = case nodeName n of
   "#document" -> do
     modify_ (_ { waitForBody = true })
-    errorAndContinue n
-  "html" -> n_html n
-  "HTML" -> n_html n
+    errorAndContinue clargs n
+  "html" -> n_html clargs n
+  "HTML" -> n_html clargs n
   "HEAD" -> do
     modify_ (_ { waitForBody = true })
     addNoHalogenError "Found node \"head\", skipping."
     pure []
   "BODY" -> do
     modify_ (_ { waitForBody = false })
-    errorAndContinue n
+    errorAndContinue clargs n
   "#text" -> do
     waitForBody <- gets _.waitForBody
     if waitForBody then
@@ -183,31 +212,29 @@ run n = case nodeName n of
     only_ws <- liftEffect $ noChildrenAndOnlyWhitespace n
 
     if only_ws then
-      handleNode n "canvas"
+      handleNode clargs n "canvas"
     else do
       addUnimplementedError "Handling of node \"canvas\" when it has children."
       pure []
-  -- "BR" -> do
-  --     addUnimplementedError "Handling of node \"br\"."
-  --     pure []
-  -- "HR" -> do
-  --     addUnimplementedError "Handling of node \"br\"."
-  --     pure []
   _ -> do
     let normal_elems = ["A", "ABBR", "ADDRESS", "ARTICLE", "AUDIO", "B", "BLOCKQUOTE", "BR", "BUTTON", "CAPTION", "circle", "CITE", "CODE", "DATALIST", "DD", "DEL", "DETAILS", "DFN", "DIV", "DL", "DT", "EM", "EMBED", "FIELDSET", "FIGCAPTION", "FIGURE", "FOOTER", "FORM", "H1", "H2", "H3", "H4", "H5", "H6", "HEADER", "HR", "I", "IFRAME", "IMG", "INPUT", "INS", "KBD", "LABEL", "LEGEND", "LI", "MAIN", "MARK", "METER", "NAV", "OBJECT", "OL", "OPTGROUP", "OPTION", "P", "PRE", "PROGRESS", "Q", "SAMP", "SECTION", "SELECT", "SMALL", "SOURCE", "SPAN", "STRONG", "SUB", "SUMMARY", "SUP", "TABLE", "TBODY", "TD", "TEXTAREA", "TFOOT", "TH", "THEAD", "TIME", "TR", "U", "UL", "VAR", "VIDEO"]
-    let unsupported_elems = ["#comment", "PICTURE", "S", "svg"]
+    let unsupported_elems = ["#comment"]
 
     if elem (nodeName n) normal_elems then
-      handleNode n (toLower $ nodeName n)
+      handleNode clargs n (toLower $ nodeName n)
     else if elem (nodeName n) unsupported_elems then do
       addNoHalogenError "Found node \"s\", skipping."
       pure []
-    else do
-      addUnimplementedError $ "Handling of node \"" <> (nodeName n) <> "\""
-      -- node_info <- liftEffect $ getShortNodeInfo n
-      pure []
+    else
+      if cli_options.format `elem` [Raw, App] then do
+        addConvertedToRawInfo $ "Node \"" <> (nodeName n) <> "\""
+        handleRawNode n
+      else do
+        addUnimplementedError $ "Handling of node \"" <> (nodeName n) <> "\""
+        pure []
 
 
+-- excludes id and class? attribute (handled separately)
 attributesToAST :: Partial => Node -> FO.Object String -> StateT RunState Effect (Array (Expr Void))
 attributesToAST n attributes = FO.foldM (helper n) [] attributes
 
@@ -256,48 +283,65 @@ attributesToAST n attributes = FO.foldM (helper n) [] attributes
                      pure Nothing
 
 
-handleNode :: Partial => Node -> String -> StateT RunState Effect (Array (Expr Void))
-handleNode n function_name_with_props = handleNodeWithChildren n function_name_with_props $ \node -> do
-  children_expr <- getChildrenExpr node
-  mergeChildren n children_expr
+allAttributesToAST :: Partial => Node -> StateT RunState Effect (Array (Expr Void))
+allAttributesToAST n = (liftEffect $ maybeShortElementInfo n) >>=
+  case _ of
+    Nothing -> pure []
+    Just e_info -> do
+      let id = if String.null e_info.id then
+                 []
+               else
+                 [ exprApp (exprIdent "HP.id") [exprString e_info.id] ]
+
+      attributes <- attributesToAST n e_info.attributes
+
+      classes <- do
+        no_css_helper <- gets (_.noCssHelper)
+        if no_css_helper then
+          let first_part :: String -> Expr Void -> Expr Void
+              first_part classname expr = exprOp (exprIdent classname) [ binaryOp "$" (exprApp (exprIdent "coerce") [expr] )]
+          in pure $ case length (e_info.classList) of
+               0 -> []
+               1 -> [ first_part "HP.class_" $ exprString $ unsafePartial $ fromJust $ head e_info.classList ]
+               _ -> [ first_part "HP.classes" $ exprArray $ map exprString e_info.classList ]
+        else pure
+          case length (e_info.classList) of
+            0 -> []
+            1 -> [ exprApp (exprIdent "css") [exprString $ unsafePartial $ fromJust $ head e_info.classList] ]
+            _ -> [ exprApp (exprIdent "css") [exprString $ intercalate " " e_info.classList] ]
+
+      when (not $ null classes) $ modify_ (_ { sawClasses = true })
+
+      pure $ id <> attributes <> classes
+
+
+handleRawNode :: Partial => Node -> StateT RunState Effect (Array (Expr Void))
+handleRawNode n = case fromNode n of
+  Nothing -> do
+    addProgramError $ "Could not convert node \"" <> (nodeName n) <> "\" into Element."
+    pure []
+  Just e -> do
+    let outer_html = elementGetOuterHtml e
+    pure [ exprApp (exprIdent "Raw.raw") [exprString outer_html] ]
+
+
+-- takes care of generating right halogen function name and the attributes for the element
+-- children can be passed as desired
+handleNodeAttributes :: Partial => Node -> String -> Array (Expr Void) -> StateT RunState Effect (Array (Expr Void))
+handleNodeAttributes n function_name_with_props children = do
+  let function_name_with_props2 = "HH." <> function_name_with_props
+  let function_name_no_props = function_name_with_props2 <> "_"
+
+  combined_attributes <- allAttributesToAST n
+
+  if null combined_attributes then
+    pure [ exprApp (exprIdent function_name_no_props) children ]
+  else
+    pure [ exprApp (exprIdent function_name_with_props2) ([exprArray combined_attributes] <> children) ]
 
 
 handleNodeWithChildren :: Partial => Node -> String -> (Node -> StateT RunState Effect (Array (Expr Void))) -> StateT RunState Effect (Array (Expr Void))
 handleNodeWithChildren n function_name_with_props makeChildren = do
-  -- liftEffect $ getShortNodeInfo n >>= traceM
-  let function_name_with_props2 = "HH." <> function_name_with_props
-  let function_name_no_props = function_name_with_props2 <> "_"
-
-  combined_attributes <- (liftEffect $ maybeShortElementInfo n) >>=
-    case _ of
-      Nothing -> pure []
-      Just e_info -> do
-        let id = if String.null e_info.id then
-                   []
-                 else
-                   [ exprApp (exprIdent "HP.id") [exprString e_info.id] ]
-
-        attributes <- attributesToAST n e_info.attributes
-
-        classes <- do
-          no_css_helper <- gets (_.noCssHelper)
-          if no_css_helper then
-            let first_part :: String -> Expr Void -> Expr Void
-                first_part classname expr = exprOp (exprIdent classname) [ binaryOp "$" (exprApp (exprIdent "coerce") [expr] )]
-            in pure $ case length (e_info.classList) of
-                 0 -> []
-                 1 -> [ first_part "HP.class_" $ exprString $ unsafePartial $ fromJust $ head e_info.classList ]
-                 _ -> [ first_part "HP.classes" $ exprArray $ map exprString e_info.classList ]
-          else pure
-            case length (e_info.classList) of
-              0 -> []
-              1 -> [ exprApp (exprIdent "css") [exprString $ unsafePartial $ fromJust $ head e_info.classList] ]
-              _ -> [ exprApp (exprIdent "css") [exprString $ intercalate " " e_info.classList] ]
-
-        when (not $ null classes) $ modify_ (_ { sawClasses = true })
-
-        pure $ id <> attributes <> classes
-
   -- No children when only whitespace text
   children <- do
     only_ws <- liftEffect $ noChildrenAndOnlyWhitespace n
@@ -317,10 +361,47 @@ handleNodeWithChildren n function_name_with_props makeChildren = do
       addNoHalogenError $ "Node \"" <> (nodeName n) <> "\" had child nodes but halogen does not allow it."
       pure []
 
-  if null combined_attributes then
-    pure [ exprApp (exprIdent function_name_no_props) children2 ]
-  else
-    pure [ exprApp (exprIdent function_name_with_props2) ([exprArray combined_attributes] <> children2) ]
+  handleNodeAttributes n function_name_with_props children2
+
+
+handleNode :: Partial => CLArgs -> Node -> String -> StateT RunState Effect (Array (Expr Void))
+handleNode clargs n function_name_with_props = handleNodeWithChildren n function_name_with_props $ \node -> do
+  children_expr <- getChildrenExpr clargs node
+  mergeChildren n children_expr
+
+
+
+-- handleNodeWithChildren :: Partial => Node -> String -> (Node -> StateT RunState Effect (Array (Expr Void))) -> StateT RunState Effect (Array (Expr Void))
+-- handleNodeWithChildren n function_name_with_props makeChildren = do
+--   -- liftEffect $ getShortNodeInfo n >>= traceM
+--   let function_name_with_props2 = "HH." <> function_name_with_props
+--   let function_name_no_props = function_name_with_props2 <> "_"
+
+--   combined_attributes <- allAttributesToAST n
+
+--   -- No children when only whitespace text
+--   children <- do
+--     only_ws <- liftEffect $ noChildrenAndOnlyWhitespace n
+--     if only_ws then
+--       pure []
+--     else
+--       makeChildren n
+
+--   let halogen_self_closing_tags = ["AREA", "BASE", "BR", "COL", "COMMAND", "HR", "IFRAME", "IMG", "INPUT", "LINK", "META", "PARAM", "SOURCE", "TEXTAREA", "TRACK", "WBR"]
+
+--   children2 <-
+--     if notElem (nodeName n) halogen_self_closing_tags then
+--       pure [ exprArray children ]
+--     else if null children then
+--       pure []
+--     else do
+--       addNoHalogenError $ "Node \"" <> (nodeName n) <> "\" had child nodes but halogen does not allow it."
+--       pure []
+
+--   if null combined_attributes then
+--     pure [ exprApp (exprIdent function_name_no_props) children2 ]
+--   else
+--     pure [ exprApp (exprIdent function_name_with_props2) ([exprArray combined_attributes] <> children2) ]
 
 
 noChildrenAndOnlyWhitespace :: Partial => Node -> Effect Boolean
@@ -358,8 +439,8 @@ runner clargs n = flip runStateT (initialRunState clargs) runCodegen
         runCodegen = unsafePartial (halogenHeader clargs n)
 
 halogenHeader :: CLArgs -> Node -> Partial => StateT RunState Effect (Module Void)
-halogenHeader (CLArgs cli_options) n = do
-  halogen_elements <- run n
+halogenHeader clargs@(CLArgs cli_options) n = do
+  halogen_elements <- run clargs n
 
   let halogen_expression =
         if length halogen_elements == 1 then
@@ -372,23 +453,49 @@ halogenHeader (CLArgs cli_options) n = do
   let gen_imports =
         [ declImport "Prelude" [] ]
         <>
-        ( if cli_options.notExecutable then
-            []
-          else
+        ( if cli_options.format `elem` [File, App] then
             [ declImport "Effect" [ importType "Effect" ] ]
+          else
+            []
+        )
+        <>
+        ( if cli_options.format `elem` [Raw, App] then
+            [ declImport "Effect.Class" [ importClass "MonadEffect" ]
+            , declImportAs "Halogen" [] "H"
+            ]
+          else
+            []
+        )
+        <>
+        ( if cli_options.format == App then
+            [ declImportAs "Halogen.Aff" [] "HA" ]
+          else
+            []
         )
         <>
         [ declImportAs "Halogen.HTML" [] "HH"
-        , declImportAs "Halogen.HTML.Properties" [] "HP"
+        , declImportAs "Halogen.HTML.Properties" [] "HP" -- todo: this can be optional on whether an attribute was detected
         ]
         <>
-        ( if cli_options.notExecutable then
-            []
+        ( if cli_options.format `elem` [Raw, App] then
+            [ declImportAs "Halogen.HTML.Raw" [] "Raw" ]
           else
+            []
+        )
+        <>
+        ( if cli_options.format == App then
+            [ declImport "Halogen.VDom.Driver" [ importValue "runUI" ] ]
+          else
+            []
+        )
+        <>
+        ( if cli_options.format == File then
             [ declImport "Halogen.VDom.DOM.StringRenderer" [ importValue "render" ]
             , declImport "Node.Encoding" [ importTypeMembers "Encoding" ["UTF8"] ]
             , declImport "Node.FS.Sync" [importValue "writeTextFile"]
             ]
+          else
+            []
         )
         <>
         ( if saw_classes && cli_options.noCssHelper then
@@ -396,9 +503,57 @@ halogenHeader (CLArgs cli_options) n = do
           else
             []
         )
-
+        <>
+        ( if cli_options.format `elem` [Raw, App] then
+            [ declImport "Type.Row" [ importTypeOp "+" ]  ]
+          else
+            []
+        )
 
   let gen_declarations =
+        ( case cli_options.format of
+            Plain ->
+              [ declSignature "template" $ typeForall [typeVar "w", typeVar "i"] $ typeApp (typeCtor "HH.HTML") [typeVar "w", typeVar "i"]
+              , declValue "template" [] halogen_expression
+              ]
+            File  ->
+              [ declSignature "renderHtml" $ typeArrow [ typeApp (typeCtor "HH.HTML") [typeCtor "String", typeCtor "Void"] ] ( typeCtor "String" )
+              , declValue "renderHtml" [binderParens $ binderCtor "HH.HTML" [binderVar "inner"]] $
+                  exprApp (exprIdent "render") [exprIdent "identity", exprIdent "inner"]
+              ]
+            _     -> []
+        )
+        <>
+        ( case cli_options.format of
+            File ->
+              [ declSignature "main" $ typeApp (typeCtor "Effect") [ typeCtor "Unit" ]
+              , declValue "main" [] $
+                  let first_part = exprApp (exprIdent "writeTextFile") [exprCtor "UTF8", exprString "output.html"]
+                  in exprOp first_part [ binaryOp "$" (exprIdent "renderHtml"), binaryOp "$" halogen_expression ]
+              ]
+            App ->
+              [ declSignature "main" $ typeApp (typeCtor "Effect") [ typeCtor "Unit" ]
+              , declValue "main" [] (exprApp (exprIdent "HA.runHalogenAff")
+                [ exprDo
+                  [ doBind (binderVar "body") (exprIdent "HA.awaitBody")]
+                  ( exprApp (exprIdent "runUI") (map exprIdent ["component", "unit", "body"]) )
+                ])
+
+              , declSignature "component" $
+                 typeForall [typeVar "q", typeVar "i", typeVar "o", typeVar "m"] $
+                   typeConstrained [typeApp (typeCtor "MonadEffect") [ typeVar "m" ]] $
+                     typeApp (typeCtor "H.Component") [typeVar "q", typeVar "i", typeVar "o", typeVar "m"]
+              , declValue "component" [] $ exprApp (exprIdent "H.mkComponent") $ [exprRecord
+                [ Tuple "initialState" $ exprLambda [binderWildcard] (exprIdent "unit")
+                , Tuple "render" $ exprLambda [binderWildcard] (exprIdent "template")
+                , Tuple "eval" $ exprOp (exprIdent "H.mkEval")
+                  [ binaryOp "$" $ exprUpdate (exprIdent "H.defaultEval") [update "handleAction" $ exprLambda [binderWildcard] (exprApp (exprIdent "pure") [exprIdent "unit"])]
+                  ]
+                ]]
+              ]
+            _ -> []
+        )
+        <>
         ( if cli_options.noCssHelper then
             []
           else
@@ -410,20 +565,20 @@ halogenHeader (CLArgs cli_options) n = do
                 exprOp (exprIdent "HP.class_") [ binaryOp "<<<" (exprCtor "HH.ClassName") ]
             ]
         ) <>
-        if cli_options.notExecutable then
-          [ declSignature "template" $ typeForall [typeVar "w", typeVar "i"] $ typeApp (typeCtor "HH.HTML") [typeVar "w", typeVar "i"]
-          , declValue "template" [] halogen_expression
-          ]
-        else
-          [ declSignature "renderHtml" $ typeArrow [ typeApp (typeCtor "HH.HTML") [typeCtor "String", typeCtor "Void"] ] ( typeCtor "String" )
-          , declValue "renderHtml" [binderParens $ binderCtor "HH.HTML" [binderVar "inner"]] $
-              exprApp (exprIdent "render") [exprIdent "identity", exprIdent "inner"]
-
-          , declSignature "main" $ typeApp (typeCtor "Effect") [ typeCtor "Unit" ]
-          , declValue "main" [] $
-              let first_part = exprApp (exprIdent "writeTextFile") [exprCtor "UTF8", exprString "output.html"]
-              in exprOp first_part [ binaryOp "$" (exprIdent "renderHtml"), binaryOp "$" halogen_expression ]
-          ]
+        ( if cli_options.format `notElem` [Plain, File] then
+            [ leading (lineComments "H.ComponentHTML action slots m ~ HH.HTML (H.ComponentSlot slots m action) action") $
+              declSignature "template" $ typeForall [typeVar "action", typeVar "m"] $
+                typeConstrained [typeApp (typeCtor "MonadEffect") [ typeVar "m" ]] $
+                  typeApp (typeCtor "H.ComponentHTML")
+                    [ typeVar "action"
+                    , typeOp (typeApp (typeCtor "Raw.Slot") [typeCtor "Unit"]) [binaryOp "+" typeRowEmpty]
+                    , typeVar "m"
+                    ]
+            , declValue "template" [] halogen_expression
+            ]
+          else
+            []
+        )
 
   pure $ module_ "Main" [] gen_imports gen_declarations
 

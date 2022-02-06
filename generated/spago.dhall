@@ -14,12 +14,14 @@ to generate this file without the comments in this block.
 , dependencies =
   [ "effect"
   , "halogen"
+  , "halogen-raw-html"
   , "halogen-vdom-string-renderer"
   , "node-buffer"
   , "node-fs"
   , "prelude"
   , "psci-support"
   , "safe-coerce"
+  , "typelevel-prelude"
   ]
 , packages = ./packages.dhall
 , sources = [ "src/**/*.purs" ]

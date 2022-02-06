@@ -120,3 +120,18 @@ in  upstream
     , version =
         "patch-2"  -- branch, tag, or commit hash
     }
+  with halogen-raw-html =
+    { dependencies =
+      [ "const"
+      , "effect"
+      , "halogen"
+      , "maybe"
+      , "prelude"
+      , "psci-support"
+      , "typelevel-prelude"
+      , "web-dom"
+      , "web-html"
+      ]
+    , repo = "https://github.com/flip111/purescript-halogen-raw-html.git"
+    , version = "master"
+    }
