@@ -7,34 +7,9 @@ spago run -a '--help'
 
 ## Development
 
-### automatic rebuild for development
-
-#### deno
+### Building for nodejs
 ```shell
-spago bundle-app --then "sed -i.old '1s;^;#\!/usr/bin/env -S deno run --compat --unstable --allow-net --allow-read\n\n;' index.js" --watch
-```
-https://deno.land/manual@v1.16.3/npm_nodejs/compatibility_mode
-
-#### node
-```shell
-spago bundle-app --then "sed -i.old '1s;^;#\!/usr/bin/env node\n\n;' index.js" --watch
-```
-
-##### possible alternative to sed
-```shell
-printf '%s\n' H '1g/^#!/q' 1i '#!/usr/bin/env node' . w q | ed -s filename
-```
-
-##### changing terminal title within zsh
-```shell
-spago bundle-app --before " zsh -c \"export DISABLE_AUTO_TITLE=true; print -Pn \\\"\e]2;spago compiling …\a\\\"\"" --then "sed -i.old '1s;^;#\!/usr/bin/env node\n\n;' index.js; zsh -c \"print -Pn \\\"\e]2;spago ready\a\\\"\"" --else "zsh -c \"print -Pn \\\"\e]2;spago failed\a\\\"\"" --watch
-```
-
-### testing app
-https://github.com/flip111/html-differ/tree/patch-1
-
-```shell
-./index.js --input test.html --output 'generated/src/Main.purs' && (cd generated; spago run; cd ..) && html-differ test.html generated/output.html
+spago bundle --platform=node
 ```
 
 ### todo

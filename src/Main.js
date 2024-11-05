@@ -1,26 +1,17 @@
 "use strict";
 
-exports.makeNodeCompatible = function() {
-  // https://stackoverflow.com/a/55668667/1833322
-  if (typeof(DOMParser) === 'undefined') { // if DOMParser is not defined then assign jsdom DOMParser();
-    (function(global) {
-      var jsdom = require('jsdom'),
-          dom = new jsdom.JSDOM('');
-
-      global.DOMParser = dom.window.DOMParser;
-    })(global);
+export function makeNodeCompatible() {
+  if (typeof window === "undefined") {
+    import('jsdom').then(jsdom => {
+      const { JSDOM } = jsdom;
+      const dom = new JSDOM('');
+      globalThis.DOMParser = dom.window.DOMParser;
+    }).catch(error => {
+      console.error("Error loading jsdom:", error);
+    });
   }
-};
+}
 
-// Could use this if node detection is needed:
-//
-// if(typeof process === 'object' && process + '' === '[object process]'){
-//     // is node
-// }
-// else{
-//     // not node
-// }
-
-exports.elementGetOuterHtml = function(element) {
+export function elementGetOuterHtml(element) {
   return element.outerHTML;
 };

@@ -28,11 +28,17 @@ import PureScript.CST.Types
 import Tidy.Codegen
 import Web.DOM.Attr (Attr)
 import Web.DOM.Attr as Attr
+import Web.DOM.AttrName
+import Web.DOM.ClassName
 import Web.DOM.Document hiding (fromNode)
 import Web.DOM.DOMParser
-import Web.DOM.DOMTokenList
+import Web.DOM.DOMTokenList hiding (length)
 import Web.DOM.Element hiding (toNode)
-import Web.DOM.NamedNodeMap
+import Web.DOM.ElementId
+import Web.DOM.ElementName
+import Web.DOM.NamedNodeMap hiding (length)
+import Web.DOM.NamespacePrefix
+import Web.DOM.NamespaceURI
 import Web.DOM.Node
 import Web.DOM.NodeList hiding (length)
 import Web.DOM.NodeType
@@ -99,6 +105,7 @@ cl_args_parser = ado
 
   in CLArgs { inputFilepath, outputFilepath, noCssHelper, format }
 
+cliOptions ∷ ParserInfo CLArgs
 cliOptions = info (cl_args_parser <**> helper)
   ( fullDesc
  <> header "html2halogen" )
@@ -175,8 +182,6 @@ mergeChildren n children_expr = foldM f [] children_expr
             _ -> do
               addProgramError $ "found a child that returned multiple elements in parent \"" <> (nodeName n) <> "\""
               pure acc
-
-
 
 
 -- liftEffect $ getShortNodeInfo n >>= traceM
@@ -288,10 +293,11 @@ allAttributesToAST n = (liftEffect $ maybeShortElementInfo n) >>=
   case _ of
     Nothing -> pure []
     Just e_info -> do
-      let id = if String.null e_info.id then
+      let (ElementId element_id) = e_info.id
+          id = if String.null element_id then
                  []
                else
-                 [ exprApp (exprIdent "HP.id") [exprString e_info.id] ]
+                 [ exprApp (exprIdent "HP.id") [exprString element_id] ]
 
       attributes <- attributesToAST n e_info.attributes
 
@@ -368,40 +374,6 @@ handleNode :: Partial => CLArgs -> Node -> String -> StateT RunState Effect (Arr
 handleNode clargs n function_name_with_props = handleNodeWithChildren n function_name_with_props $ \node -> do
   children_expr <- getChildrenExpr clargs node
   mergeChildren n children_expr
-
-
-
--- handleNodeWithChildren :: Partial => Node -> String -> (Node -> StateT RunState Effect (Array (Expr Void))) -> StateT RunState Effect (Array (Expr Void))
--- handleNodeWithChildren n function_name_with_props makeChildren = do
---   -- liftEffect $ getShortNodeInfo n >>= traceM
---   let function_name_with_props2 = "HH." <> function_name_with_props
---   let function_name_no_props = function_name_with_props2 <> "_"
-
---   combined_attributes <- allAttributesToAST n
-
---   -- No children when only whitespace text
---   children <- do
---     only_ws <- liftEffect $ noChildrenAndOnlyWhitespace n
---     if only_ws then
---       pure []
---     else
---       makeChildren n
-
---   let halogen_self_closing_tags = ["AREA", "BASE", "BR", "COL", "COMMAND", "HR", "IFRAME", "IMG", "INPUT", "LINK", "META", "PARAM", "SOURCE", "TEXTAREA", "TRACK", "WBR"]
-
---   children2 <-
---     if notElem (nodeName n) halogen_self_closing_tags then
---       pure [ exprArray children ]
---     else if null children then
---       pure []
---     else do
---       addNoHalogenError $ "Node \"" <> (nodeName n) <> "\" had child nodes but halogen does not allow it."
---       pure []
-
---   if null combined_attributes then
---     pure [ exprApp (exprIdent function_name_no_props) children2 ]
---   else
---     pure [ exprApp (exprIdent function_name_with_props2) ([exprArray combined_attributes] <> children2) ]
 
 
 noChildrenAndOnlyWhitespace :: Partial => Node -> Effect Boolean
@@ -682,12 +654,12 @@ getShortNodeInfo n = do
 type ElementInfo =
   { attributes :: Array Attr
   , classList :: DOMTokenList
-  , className :: String
-  , id :: String
-  , localName :: String
-  , namespaceURI :: Maybe String
-  , prefix :: Maybe String
-  , tagName :: String
+  , className :: ClassName
+  , id :: ElementId
+  , localName :: ElementName
+  , namespaceURI :: Maybe NamespaceURI
+  , prefix :: Maybe NamespacePrefix
+  , tagName :: ElementName
   }
 
 getElementInfo :: Element -> Effect ElementInfo
@@ -715,7 +687,7 @@ getElementInfo e = do
 type ShortElementInfo =
   { attributes :: FO.Object String
   , classList :: Array String
-  , id :: String
+  , id :: ElementId
   }
 
 
@@ -743,28 +715,25 @@ getShortElementInfo e = do
 type AttrInfo =
   { value :: String
   , localName :: String
-  , name :: String
-  , namespaceURI :: String
-  , prefix :: String
+  , namespaceURI :: Maybe NamespaceURI
+  , prefix :: Maybe NamespacePrefix
   }
 
 getAttrInfo :: Attr -> Effect AttrInfo
 getAttrInfo a = do
-  namespaceURI <- Attr.namespaceURI a
-  prefix       <- Attr.prefix a
-  localName    <- Attr.localName a
-  name         <- Attr.name a
-  value        <- Attr.getValue a
+  let namespaceURI = Attr.namespaceURI a
+  let prefix = Attr.prefix a
+  let (AttrName localName) = Attr.localName a
+  value <- Attr.getValue a
   pure
     { namespaceURI: namespaceURI
     , prefix: prefix
     , localName: localName
-    , name: name
     , value: value
     }
 
 getShortAttrInfo :: Attr -> Effect (Tuple String String)
 getShortAttrInfo a = do
-  name  <- Attr.name a
+  let (AttrName localName) = Attr.localName a
   value <- Attr.getValue a
-  pure $ Tuple name value
+  pure $ Tuple localName value
