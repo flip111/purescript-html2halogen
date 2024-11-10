@@ -29,6 +29,7 @@ import Tidy.Codegen
 import Web.DOM.Attr (Attr)
 import Web.DOM.Attr as Attr
 import Web.DOM.AttrName
+import Web.DOM.AttrLocalName
 import Web.DOM.ClassName
 import Web.DOM.Document hiding (fromNode)
 import Web.DOM.DOMParser
@@ -42,9 +43,12 @@ import Web.DOM.NamespaceURI
 import Web.DOM.Node
 import Web.DOM.NodeList hiding (length)
 import Web.DOM.NodeType
+import Effect.Aff (Aff, launchAff_, launchAff)
+import Promise.Aff (toAff, toAffE)
+import Promise (Promise)
 
 
-foreign import makeNodeCompatible :: Effect Unit
+foreign import makeNodeCompatible :: Effect (Promise Unit)
 foreign import elementGetOuterHtml :: Element -> String
 
 data CLArgs = CLArgs
@@ -383,10 +387,13 @@ noChildrenAndOnlyWhitespace n = do
   let remaining_child_nodes = filter (\node -> nodeName node /= "#text") child_nodes
   pure $ (String.null (trim text_content)) && (null remaining_child_nodes)
 
-
 main :: Effect Unit
-main = do
-  makeNodeCompatible
+main = launchAff_ $ do
+  toAffE makeNodeCompatible
+  liftEffect main2
+
+main2 :: Effect Unit
+main2 = do
   clargs@(CLArgs cli_options) <- execParser cliOptions
   html <- readTextFile UTF8 cli_options.inputFilepath
   parser <- makeDOMParser
@@ -715,6 +722,7 @@ getShortElementInfo e = do
 type AttrInfo =
   { value :: String
   , localName :: String
+  , name :: String
   , namespaceURI :: Maybe NamespaceURI
   , prefix :: Maybe NamespacePrefix
   }
@@ -723,17 +731,19 @@ getAttrInfo :: Attr -> Effect AttrInfo
 getAttrInfo a = do
   let namespaceURI = Attr.namespaceURI a
   let prefix = Attr.prefix a
-  let (AttrName localName) = Attr.localName a
+  let (AttrLocalName localName) = Attr.localName a
+  let (AttrName name) = Attr.name a
   value <- Attr.getValue a
   pure
     { namespaceURI: namespaceURI
     , prefix: prefix
     , localName: localName
+    , name: name
     , value: value
     }
 
 getShortAttrInfo :: Attr -> Effect (Tuple String String)
 getShortAttrInfo a = do
-  let (AttrName localName) = Attr.localName a
+  let (AttrLocalName localName) = Attr.localName a
   value <- Attr.getValue a
   pure $ Tuple localName value

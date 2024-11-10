@@ -12,6 +12,7 @@
             "foldable-traversable",
             "foreign-object",
             "integers",
+            "js-promise-aff",
             "language-cst-parser",
             "maybe",
             "node-buffer",
@@ -61,6 +62,8 @@
             "integers",
             "invariant",
             "js-date",
+            "js-promise",
+            "js-promise-aff",
             "language-cst-parser",
             "lazy",
             "lists",
@@ -648,8 +651,8 @@
         "ref": "main"
       },
       "web-dom": {
-        "git": "https://github.com/purescript-web/purescript-web-dom.git",
-        "ref": "master",
+        "git": "https://github.com/flip111/purescript-web-dom.git",
+        "ref": "patch-3",
         "dependencies": [
           "effect",
           "enums",
@@ -1129,6 +1132,29 @@
         "foreign",
         "integers",
         "now"
+      ]
+    },
+    "js-promise": {
+      "type": "registry",
+      "version": "1.0.0",
+      "integrity": "sha256-kXNo5g9RJgPdrTuKRe5oG2kBIwPp+j5VDPDplqZBJzQ=",
+      "dependencies": [
+        "effect",
+        "exceptions",
+        "foldable-traversable",
+        "functions",
+        "maybe",
+        "prelude"
+      ]
+    },
+    "js-promise-aff": {
+      "type": "registry",
+      "version": "1.0.0",
+      "integrity": "sha256-s9kml9Ei74hKlMMg41yyZp4GkbmYUwaH+gBWWrdhwec=",
+      "dependencies": [
+        "aff",
+        "foreign",
+        "js-promise"
       ]
     },
     "language-cst-parser": {
@@ -1704,8 +1730,8 @@
     },
     "web-dom": {
       "type": "git",
-      "url": "https://github.com/purescript-web/purescript-web-dom.git",
-      "rev": "326c125d2f9dd5c5c1e74ac17fb95d5ddd7b4450",
+      "url": "https://github.com/flip111/purescript-web-dom.git",
+      "rev": "a668c62418613248d4751df13083983d688ddaf0",
       "dependencies": [
         "effect",
         "enums",

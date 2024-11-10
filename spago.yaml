@@ -8,6 +8,7 @@ package:
     - foldable-traversable
     - foreign-object
     - integers
+    - js-promise-aff
     - language-cst-parser
     - maybe
     - node-buffer
@@ -47,8 +48,8 @@ workspace:
       # ref: 83ec210
       subdir: lib
     web-dom:
-      git: https://github.com/purescript-web/purescript-web-dom.git
-      ref: master
+      git: https://github.com/flip111/purescript-web-dom.git
+      ref: patch-3
       dependencies:
         - effect
         - enums
